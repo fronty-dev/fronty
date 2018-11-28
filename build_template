@@ -1,0 +1,279 @@
+#!/bin/bash
+#This is the build script for PACKAGE
+#Filename build_PACKAGE.sh
+#Date 20180508
+#Version 0.2
+#Author AL
+ 
+# Exit codes
+# 0 - worked successfully
+# 1 - config file missing
+# 2 - error with 64 bit source download
+# 3 - error with 32 bit source download
+# 4 - SlackBuild files not available
+# 5 - compilation failed
+# 6 - script already running - code to be added - flag file perhaps?
+
+# ***To add***
+# Add code to check if there is already an SBo package built, if so use it 
+# instead of downloading and building from scratch.  Only check if $PRG/$VERSION 
+# exists and $PRG not installed.  Upgrade in separate script.
+# Add code to deal with multiple downloads, eg GeoIP, has 6 extras.
+# Improve code to assign values to vars instead of echo $VARNAME | cut -f x -d, etc if possible.
+# More error checking
+# ***End of To add section***
+
+#Get the apps category from category.apps first
+#Get the values for DWNLDDIR and SLACKVER - if the config file is missing, print
+#an error and exit
+if [ ! -f /etc/fronty/fronty.conf ]; then
+	echo "/etc/fronty/fronty.conf missing!  Exiting..."
+	exit 1
+fi
+source /etc/fronty/fronty.conf
+
+#Export the variables so pre- and post- scripts have them if needed
+export SOURCE=$SOURCE
+export CONFIG=$CONFIG
+export SCRIPTS=$SCRIPTS
+export SLACKVER=$SLACKVER
+export FRONTY_LOGFILE=$FRONTY_LOGFILE
+
+#PROGS variable lists all the packages required for the install.
+#Change packages to the list of packages that need installing, in order.
+PROGS="pkg123"
+
+#Check category.apps.index and category.apps.data are available, if not print an error and run the script.
+if [ ! -f $CONFIG/category.apps.index ] || [ ! -f $CONFIG/category.apps.data ]; then
+	echo "A category index or data file is missing, running script..."
+	$BASEDIR/build_category_apps_repo.sh
+fi
+
+#Set APP to the name of the package being installed, the last (or only) one in PROGS.
+APP=$(echo $PROGS | rev | cut -f1 -d" " | cut -b1- | rev)
+echo "Start build of $APP">> $FRONTY_LOGFILE
+# Check if each package exists.  If not it may be a typo and PROGS is incorrect.
+# Exit if any is incorrect
+for PRGCHK in $PROGS; do
+	PKG_EXISTS=$(grep ,$PRGCHK, $CONFIG/category.apps.index | head -1 | cut -f2 -d,)
+	if [ -z $PKG_EXISTS ]; then
+		echo "Package "$PRGCHK" doesn't exist, or it is a typo."
+		echo "Please fix and rerun.  Exiting"
+		echo "Package "$PRGCHK" doesn't exist, or it is a typo." >> $FRONTY_LOGFILE
+		exit 7
+	fi
+done
+#Now go through each package in turn, check if it has a directory, if not get the download info and Slackbuild files
+#from category.apps.data, download, check md5sum and continue.
+APP=$(echo $PROGS | rev | cut -f1 -d" " | rev)
+for PRG in $PROGS; do
+	cd $SOURCE
+	echo "Date :" `date +%Y%m%d-%H%M%S` " Start package : " $PRG >> $FRONTY_LOGFILE
+	# Check if the package exists.  If not it may be a typo and PROGS is incorrect.
+	#Fields in category.apps.data:
+	#CATEGORY,$PRGNAM,$VERSION,$HOMEPAGE,$DOWNLOAD,$MD5SUM,$DWNLD_x86_64,$MD5SUM_x86_64,$REQUIRES
+	#Get the pkg info and split it into separate variables
+	PROGCAT=$(grep ","$PRG"," $CONFIG/category.apps.index)
+	PROGPARAMS=$(grep $PROGCAT $CONFIG/category.apps.data)
+	CATEGORY=$(echo $PROGPARAMS | cut -f1 -d,)
+	VERSION=$(echo $PROGPARAMS | cut -f3 -d,)
+	DWNLD=$(echo $PROGPARAMS | cut -f5 -d,)
+	MD5SUM=$(echo $PROGPARAMS | cut -f6 -d,)
+	DWNLD_x86_64=$(echo $PROGPARAMS | cut -f7 -d,)
+	MD5SUM_x86_64=$(echo $PROGPARAMS | cut -f8 -d,)
+	echo "PROGPARAMS : "$PROGPARAMS >> $FRONTY_LOGFILE
+
+	#Check if the package is installed, if so skip this and go onto the next package
+	PKG_FOUND=$(ls /var/log/packages | grep $PRG | rev | cut -f4- -d- | rev | head -1)
+	if [ ! -z $PKG_FOUND ] && [ $PKG_FOUND != $PRG ] || [ -z $PKG_FOUND ]; then
+		echo "Package "$PRG" not installed" >> $FRONTY_LOGFILE
+		if [ ! -d $PRG ]; then 
+			#Create the dir with the PRG as its name
+			mkdir $PRG
+			echo "Created dir for "$PRG >> $FRONTY_LOGFILE
+			cd $PRG
+			#Create the dir with the version as its name
+			mkdir $VERSION
+			echo "Created dir version "$VERSION" for "$PRG >> $FRONTY_LOGFILE
+			cd $VERSION
+		else
+			cd $PRG
+			if [ -d $VERSION ]; then 
+				cd $VERSION
+			else
+				mkdir $VERSION
+				cd $VERSION
+			fi
+		fi
+		# Now for some processing of the downloads and md5sums - some packages have more than one download
+		# and because of this the downloads have to be in a file.  Variables cannot hold newline characters.
+		# If a variable has spaces in it it causes issues with the -z option (if [ -z VARNAME ...) because
+		# only one argument is expected, whereas having a space means there is more than one argument which
+		# is why wc -c is used.
+		# 64 bit downloads
+		if [ `echo $DWNLD_x86_64 | wc -c` -gt 1 ]; then
+			echo $DWNLD_x86_64 | sed s/\ /\\n/g > LINK64
+			echo $DWNLD_x86_64 | sed s/\ /\\n/g | rev | cut -f1 -d\/ | rev > FILE64
+			echo $MD5SUM_x86_64 | sed s/\ /\\n/g > MD5SUM64-TMP
+			paste MD5SUM64-TMP FILE64 | sed s/\\t/"  "/g > MD5SUM64
+		elif [ `echo $DWNLD | wc -c` -gt 1 ]; then
+			echo $DWNLD | sed s/\ /\\n/g > LINK32
+			echo $DWNLD | sed s/\ /\\n/g | rev | cut -f1 -d\/ | rev > FILE32
+			echo $MD5SUM | sed s/\ /\\n/g > MD5SUM32-TMP
+			paste MD5SUM32-TMP FILE32 | sed s/\\t/"  "/g > MD5SUM32
+		fi
+	
+		# If the source has already been downloaded don't download it again.
+		# check the machine arch first then check if there is a 64 bit or 32 bit download
+		if [ `uname -m` == "x86_64" ]; then
+			#Is there an x86_64 download, if so download it
+			if [ -f FILE64 ]; then
+				#If the file is already here don't download it again.
+				for DWNLD64 in $(cat FILE64); do
+					if [ ! -f $DWNLD64 ]; then
+						echo "Fetching x86_64 download "$DWNLD64 >> $FRONTY_LOGFILE
+						wget $(grep $DWNLD64 LINK64)
+						echo "Download complete for "$DWNLD64 >> $FRONTY_LOGFILE
+					fi
+					grep $DWNLD64 MD5SUM64 > "MD5SUM64-"$PRG
+					md5sum -c "MD5SUM64-"$PRG
+					if [ $? != 0 ]; then
+						echo "Error with x86_64 downloaded source for " $PRG" exiting..." >> $FRONTY_LOGFILE
+						echo >> $FRONTY_LOGFILE
+						exit 2
+					fi
+					echo "md5sum_x86_64 OK for "$DWNLD_x86_64 >> $FRONTY_LOGFILE
+				done
+			# There may be a 32 bit download 
+			elif [ -f FILE32 ]; then
+				#If the file is already here don't download it again.
+				for DWNLD32 in $(cat FILE32); do
+					if [ ! -f $DWNLD32 ]; then
+						echo "Fetching x86 download "$DWNLD32 >> $FRONTY_LOGFILE
+						wget $(grep $DWNLD32 LINK32)
+						echo "Download complete for "$DWNLD32 >> $FRONTY_LOGFILE
+					fi
+					grep $DWNLD32 MD5SUM32 > "MD5SUM32-"$PRG
+					md5sum -c "MD5SUM32-"$PRG
+					if [ $? != 0 ]; then
+						echo "Error with downloaded source for " $PRG" exiting..." >> $FRONTY_LOGFILE
+						echo >> $FRONTY_LOGFILE
+						exit 3
+					fi
+					echo "md5sum OK for "$DWNLD32 >> $FRONTY_LOGFILE
+				done
+			fi
+		elif [ `uname -m` == "x86" ] || [ $(uname -m) == "i686" ]; then
+			#Download the x86 source
+			for DWNLD32 in $(cat FILE32); do
+				if [ ! -f $DWNLD32 ]; then
+					echo "Fetching x86 download "$DWNLD32 >> $FRONTY_LOGFILE
+					wget $(grep $DWNLD32 LINK32)
+					echo "Download complete for "$DWNLD32 >> $FRONTY_LOGFILE
+				fi
+				grep $DWNLD32 MD5SUM32 > "MD5SUM32-"$PRG
+				md5sum -c "MD5SUM32-"$PRG
+				if [ $? != 0 ]; then
+					echo "Error with downloaded source for " $PRG" exiting..." >> $FRONTY_LOGFILE
+					echo >> $FRONTY_LOGFILE
+					exit 3
+				fi
+				echo "md5sum OK for "$DWNLD32 >> $FRONTY_LOGFILE
+			done
+		fi
+		# Check the SlackBuild files are available and copy to the source dir
+		if [ ! $CONFIG/$CATEGORY/$PRG/$PRG".SlackBuild" ]; then
+			echo $PRG".SlackBuild not available, exiting..." >> $FRONTY_LOGFILE
+			echo >> $FRONTY_LOGFILE
+			exit 4
+		else	
+			cp -R $CONFIG/$CATEGORY/$PRG/* .
+			echo "Copied "$PRG" SlackBuild files...">>$FRONTY_LOGFILE
+			BUILD=$(grep ^BUILD $PRG".SlackBuild" | cut -f2 -d- | rev | cut -b2- | rev)
+		fi
+
+		#If there are any prebuild scripts, run them now.  Postfix has one to remove 
+		#sendmail if it is installed
+		if [ -f $CONFIG/$PRG.preoptions ]; then
+			echo "Running prebuild script "$PRG".preoptions now..>" >> $FRONTY_LOGFILE
+			$CONFIG/$PRG.preoptions
+		fi
+		#Run the Slackbuild script
+		#Note that some packages may require extra options so add them here in $PKGOPTIONS,
+		#from category.apps.options
+		#If the SBo package is not present compile, otherwise to the install
+		if [ ! -f $PRG"-"$VERSION*"SBo"* ]; then
+			COMPILEDATE=$(date +%Y%m%d-%H%M%S)
+			if [ -f $CONFIG/$PRG.options ]; then
+				echo "Compiling with options..." >> $FRONTY_LOGFILE
+				echo >> $FRONTY_LOGFILE
+				sh ./$PRG.SlackBuild $(cat $PRG.options) | tee ./$PRG"_"$COMPILEDATE"_build.log"
+			else
+				echo "Compiling without options..." >> $FRONTY_LOGFILE
+				sh ./$PRG.SlackBuild | tee ./$PRG"_"$COMPILEDATE"_build.log"
+			fi
+		
+			if [ ! `tail -2 $PRG"_"$COMPILEDATE"_build.log"|head -1 | rev | cut -f1 -d" "| rev | grep created` ]; then
+			 	echo "Compilation of "$PRG" failed, check "$PRG"_"$COMPILEDATE"_build.log and "$FRONTY_LOGFILE >> ./$PRG"_"$COMPILEDATE"_build.log"
+				echo "Compilation of "$PRG" failed, check "$PRG"_"$COMPILEDATE"_build.log and "$FRONTY_LOGFILE " "$(date +%Y%m%d-%H%M%S) >> $FRONTY_LOGFILE
+				echo >> $FRONTY_LOGFILE
+				exit 5
+			fi
+			PKG=$(tail -2 ./$PRG"_"$COMPILEDATE"_build.log" | head -1 | cut -b19- | rev | cut -b10- | rev)
+			mv $PKG .
+			echo $PKG" moved from /tmp to "$(pwd)
+		else
+			# Package already compiled
+			echo $PRG" already compiled, SBo exists..." >> $FRONTY_LOGFILE
+		fi
+		# If the compile was skipped, an SBo file is present but the var PKG has not been set, so PKGNAME 
+		# will not be set.  Do it here.
+		if [ ! -z $PKG ]; then
+			PKGNAME=$(echo $PKG | cut -b6-)
+		else
+			PKGNAME=$( ls | grep SBo)
+		fi
+		echo $PKGNAME
+		#If we have only one package to install, don't add this entry to the log, it will be done at the end.
+		if [ $PRG != $APP ]; then 
+			echo "Date :" `date +%Y%m%d-%H%M%S` " Finish "$PRG >> $FRONTY_LOGFILE
+		fi
+		echo "Installing package... "$PKGNAME >> $FRONTY_LOGFILE
+		installpkg $PKGNAME
+		touch $SOURCE/$PRG-$VERSION
+		# Run any postoptions scripts		
+		if [ -f $CONFIG/$PRG.postoptions ]; then
+			echo "Running postoptions script..." >> $FRONTY_LOGFILE
+			echo >> $FRONTY_LOGFILE
+			$CONFIG/$PRG.postoptions
+		fi
+		echo >> $FRONTY_LOGFILE
+	else
+		echo "Package "$PRG" already installed, skipping..." >> $FRONTY_LOGFILE
+		echo >> $FRONTY_LOGFILE
+	fi
+	# Set all  the variables to blank.  Good practice.
+	PROGCAT=""
+	PROGPARAMS=""
+	CATEGORY=""
+	PRGNAM=""
+	VERSION=""
+	HOMEPAGE=""
+	DWNLOAD=""
+	MD5SUM=""
+	DWNLOAD_x86_64=""
+	MD5SUM_x86_64=""
+	DWNLD32=""
+	DWNLD64=""
+	BUILD=""
+	PKGTAR=""
+	PKGOPTIONS=""
+	PRG=""
+	APP=""
+	PKG=""
+	PKGNAME=""
+done
+echo "Date :" `date +%Y%m%d-%H%M%S` " Finished $APP" >> $FRONTY_LOGFILE
+echo "================================================================================" >> $FRONTY_LOGFILE
+echo >> $FRONTY_LOGFILE
+#Add headers to category.apps.index and category.apps.data
